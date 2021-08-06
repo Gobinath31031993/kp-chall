@@ -1,0 +1,711 @@
+
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "adminUsername": {
+      "type": "string",
+      "metadata": {
+        "description": "Username for the Virtual Machines"
+      }
+    },
+    "w-vm-count": {
+      "Value": 2,
+      "type": "int",
+      "metadata": {
+        "description": "Number of Web servers"
+      }
+    },
+    "a-vm-count": {
+      "Value": 2,
+      "type": "int",
+      "metadata": {
+        "description": "Number of App servers"
+      }
+    },
+    "db-vm-count": {
+      "Value": 2,
+      "type": "int",
+      "metadata": {
+        "description": "Number of Database servers"
+      }
+    },
+    "remoteAllowedCIDR": {
+      "type": "string",
+      "minLength": 7,
+      "defaultValue": "10.0.0.0/0",
+      "metadata": {
+        "description": "Enter Public IP CIDR"
+      }
+    },
+    "location": {
+      "type": "string",
+      "defaultValue": "[resourceGroup().location]",
+      "metadata": {
+        "description": "Location for resources."
+      }
+    },
+    "authenticationType": {
+      "type": "string",
+      "defaultValue": "sshPublicKey",
+      "allowedValues": [
+        "sshPublicKey",
+        "password"
+      ],
+      "metadata": {
+        "description": "authentication type to use on the Virtual Machine"
+      }
+    },
+    "adminPasswordOrKey": {
+      "type": "securestring",
+      "metadata": {
+        "description": "SSH Key or password for the Virtual Machine"
+      }
+    },
+    "vmSize": {
+      "type": "string",
+      "defaultValue": "Standard_B2",
+      "metadata": {
+        "description":"VM Size"
+      }
+    }     
+  },
+  "variables": {
+    "vmStorageAccountType": "Standard_GRS",
+    "vmStorageAccountName": "[concat(uniqueString(resourceGroup().id),'storage')]",
+    "diagStorageAccountName": "[concat(uniqueString(resourceGroup().id),'diagstorage')]",
+    "virtualNetworkName": "my-vnet",
+    "WebSubnetName": "websubnet",
+    "AppSubnetName": "appsubnet",
+    "DBSubnetName": "DBSubnet",
+    "webNSGName": "webnsg",
+    "appNSGName": "appnsg",
+    "DBNSGName": "DBnsg",
+    "webLoadBalancerName": "web-lb",
+    "weblbIPAddressName": "web-lb-pip",
+    "weblbDnsLabel": "[concat('weblb',uniqueString(resourceGroup().id))]",
+    "webLoadBalancerIPID": "[resourceId('Microsoft.Network/publicIPAddresses',variables('weblbIPAddressName'))]",
+    "webFrontEndIPConfigID": "[resourceId('Microsoft.Network/loadBalancers/frontendIPConfigurations',variables('webLoadBalancerName'),'loadBalancerFrontEnd')]",
+    "weblbBackendPoolID": "[resourceId('Microsoft.Network/loadBalancers/backendAddressPools',variables('webLoadBalancerName'),'loadBalancerBackend')]",
+    "weblbProbeHttpID": "[resourceId('Microsoft.Network/loadBalancers/probes',variables('webLoadBalancerName'),'weblbProbeHttp')]",
+    "weblbProbeHttpsID": "[resourceId('Microsoft.Network/loadBalancers/probes',variables('webLoadBalancerName'),'weblbProbeHttps')]",
+    "internalLoadBalancerName": "internal-lb",
+    "internalFrontEndIPConfigID": "[resourceId('Microsoft.Network/loadBalancers/frontendIpConfigurations',variables('internalLoadBalancerName'),'loadBalancerFrontEnd')]",
+    "internallbBackendPoolID": "[resourceId('Microsoft.Network/loadBalancers/backendAddressPools',variables('internalLoadBalancerName'),'loadBalancerBackend')]",
+    "internallbProbeSSHID": "[resourceId('Microsoft.Network/loadBalancers/probes',variables('internalLoadBalancerName'),'internallbProbeSSH')]",
+    "availSetName": "avail-set-",
+    "webVmNicName": "[concat(variables('webVmName'), '-nic-')]",
+    "appVmNicName": "[concat(variables('appVmName'), '-nic-')]",
+    "DBVmNicName": "[concat(variables('DBVmName'), '-nic-')]",
+    "redHatsku": "7.3",
+    "Publisher": "RedHat",
+    "Offer": "RHEL",
+    "webVmName": "webvm",
+    "appVmName": "appvm",
+    "DBVmName": "DBvm",
+    "linuxConfiguration": {
+      "disablePasswordAuthentication": true,
+      "ssh": {
+        "publicKeys": [
+          {
+            "path": "[concat('/home/', parameters('adminUsername'), '/.ssh/authorized_keys')]",
+            "keyData": "[parameters('adminPasswordOrKey')]"
+          }
+        ]
+      }
+    }
+  },
+  "resources": [
+    {
+      "type": "Microsoft.Storage/storageAccounts",
+      "name": "[concat(variables('vmStorageAccountName'), copyindex(1))]",
+      "apiVersion": "2021-01-01",
+      "location": "[parameters('location')]",
+      "copy": {
+        "name": "vmStorageAccountLoop",
+        "count": 4
+      },
+      "sku": {
+        "name": "[variables('vmStorageAccountType')]"
+      },
+      "kind": "Storage",
+      "properties": {}
+    },
+    {
+      "type": "Microsoft.Storage/storageAccounts",
+      "name": "[variables('diagStorageAccountName')]",
+      "apiVersion": "2021-01-01",
+      "location": "[parameters('location')]",
+       "sku": {
+        "name": "Standard_LRS"
+      },
+      "kind": "Storage",
+      "properties": {}
+    },
+    {
+      "type": "Microsoft.Network/networkSecurityGroups",
+      "name": "[variables('webNSGName')]",
+      "apiVersion": "2021-01-01",
+      "location": "[parameters('location')]",
+      
+      "properties": {
+        "securityRules": [
+          {
+            "name": "HTTP-allow",
+            "properties": {
+              "protocol": "Tcp",
+              "sourcePortRange": "*",
+              "destinationPortRange": "80",
+              "sourceAddressPrefix": "[parameters('remoteAllowedCIDR')]",
+              "destinationAddressPrefix": "1.1.1.1/22",
+              "access": "Allow",
+              "priority": 105,
+              "direction": "Inbound"
+            }
+          },
+          {
+            "name": "HTTPS-allow",
+            "properties": {
+              "protocol": "Tcp",
+              "sourcePortRange": "*",
+              "destinationPortRange": "443",
+              "sourceAddressPrefix": "[parameters('remoteAllowedCIDR')]",
+              "destinationAddressPrefix": "1.1.1.1/22",
+              "access": "Allow",
+              "priority": 110,
+              "direction": "Inbound"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.Network/networkSecurityGroups",
+      "name": "[variables('appNSGName')]",
+      "apiVersion": "2021-01-01",
+      "location": "[parameters('location')]",
+      "properties": {
+      }
+    },
+    {
+      "type": "Microsoft.Network/networkSecurityGroups",
+      "name": "[variables('DBNSGName')]",
+      "apiVersion": "2021-01-01",
+      "location": "[parameters('location')]",
+      "properties": {
+      }
+    },
+    {
+      "type": "Microsoft.Network/networkSecurityGroups",
+      "name": "[variables('ConNSGName')]",
+      "apiVersion": "2021-01-01",
+      "location": "[parameters('location')]",
+      "properties": {
+        "securityRules": [
+          {
+            "name": "SSH-allow",
+            "properties": {
+              "protocol": "Tcp",
+              "sourcePortRange": "*",
+              "destinationPortRange": "22",
+              "sourceAddressPrefix": "[parameters('remoteAllowedCIDR')]",
+              "destinationAddressPrefix": "10.0.0.0/28",
+              "access": "Allow",
+              "priority": 105,
+              "direction": "Inbound"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.Network/publicIPAddresses",
+      "name": "[variables('ConIPAddressName')]",
+      "apiVersion": "2021-01-01",
+      "location": "[parameters('location')]",
+      "properties": {
+        "publicIPAllocationMethod": "Static",
+        "dnsSettings": {
+          "domainNameLabel": "[variables('ConDnsLabel')]"
+        },
+        "idleTimeoutInMinutes": 10
+      }
+    },
+    {
+      "type": "Microsoft.Network/publicIPAddresses",
+      "name": "[variables('weblbIPAddressName')]",
+      "apiVersion": "2021-01-01",
+      "location": "[parameters('location')]",
+      "properties": {
+        "publicIPAllocationMethod": "Static",
+        "idleTimeoutInMinutes": 10,
+        "dnsSettings": {
+          "domainNameLabel": "[variables('weblbDnsLabel')]"
+        }
+      }
+    },
+    {
+      "type": "Microsoft.Network/virtualNetworks",
+      "name": "[variables('virtualNetworkName')]",
+      "apiVersion": "2021-01-01",
+      "location": "[parameters('location')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/networkSecurityGroups/', variables('webNSGName'))]",
+        "[resourceId('Microsoft.Network/networkSecurityGroups/', variables('appNSGName'))]",
+        "[resourceId('Microsoft.Network/networkSecurityGroups/', variables('DBNSGName'))]",
+        "[resourceId('Microsoft.Network/networkSecurityGroups/', variables('ConNSGName'))]"
+      ],
+      "properties": {
+        "addressSpace": {
+          "addressPrefixes": [
+            "1.1.1.1/16"
+          ]
+        },
+        "subnets": [
+          {
+            "name": "[variables('WebSubnetName')]",
+            "properties": {
+              "addressPrefix": "1.1.2.1/24",
+              "networkSecurityGroup": {
+                "id": "[resourceId('Microsoft.Network/networkSecurityGroups', variables('webNSGName'))]"
+              }
+            }
+          },
+          {
+            "name": "[variables('AppSubnetName')]",
+            "properties": {
+              "addressPrefix": "1.1.3.1/24",
+              "networkSecurityGroup": {
+                "id": "[resourceId('Microsoft.Network/networkSecurityGroups', variables('appNSGName'))]"
+              }
+            }
+          },
+          {
+            "name": "[variables('DBSubnetName')]",
+            "properties": {
+              "addressPrefix": "1.1.4.1/24",
+              "networkSecurityGroup": {
+                "id": "[resourceId('Microsoft.Network/networkSecurityGroups', variables('DBNSGName'))]"
+              }
+            }
+          },
+        ]
+	  }
+    },
+    {
+      "type": "Microsoft.Compute/availabilitySets",
+      "name": "[concat(variables('availSetName'), copyindex(1))]",
+      "apiVersion": "2021-01-01",
+      "location": "[parameters('location')]",
+      "copy": {
+        "name": "availSetLoop",
+        "count": 3
+      },
+      "sku": {
+        "name": "Aligned"
+      },
+      "properties": {
+        "platformFaultDomainCount": 2,
+        "platformUpdateDomainCount": 5
+      }
+    },
+    {
+      "type": "Microsoft.Network/loadBalancers",
+      "name": "[variables('webLoadBalancerName')]",
+      "apiVersion": "2021-01-01",
+      "location": "[parameters('location')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/publicIPAddresses/', variables('weblbIPAddressName'))]"
+      ],
+      "properties": {
+        "frontendIPConfigurations": [
+          {
+            "name": "loadBalancerFrontEnd",
+            "properties": {
+              "publicIPAddress": {
+                "id": "[variables('webLoadBalancerIPID')]"
+              }
+            }
+          }
+        ],
+        "backendAddressPools": [
+          {
+            "name": "loadBalancerBackend"
+          }
+        ],
+        "loadBalancingRules": [
+          {
+            "name": "LBRuleForlb80IP",
+            "properties": {
+              "frontendIPConfiguration": {
+                "id": "[variables('webFrontEndIPConfigID')]"
+              },
+              "backendAddressPool": {
+                "id": "[variables('weblbBackendPoolID')]"
+              },
+              "protocol": "Tcp",
+              "frontendPort": 80,
+              "backendPort": 80,
+              "idleTimeoutInMinutes": 5,
+              "enableFloatingIP": false,
+              "probe": {
+                "id": "[variables('weblbProbeHttpID')]"
+              }
+            }
+          },
+          {
+            "name": "LBRuleForlb443IP",
+            "properties": {
+              "frontendIPConfiguration": {
+                "id": "[variables('webFrontEndIPConfigID')]"
+              },
+              "backendAddressPool": {
+                "id": "[variables('weblbBackendPoolID')]"
+              },
+              "protocol": "Tcp",
+              "frontendPort": 443,
+              "backendPort": 443,
+              "idleTimeoutInMinutes": 5,
+              "enableFloatingIP": false,
+              "probe": {
+                "id": "[variables('weblbProbeHttpsID')]"
+              }
+            }
+          }
+        ],
+        "probes": [
+          {
+            "name": "weblbProbeHttp",
+            "properties": {
+              "protocol": "Tcp",
+              "port": 80,
+              "intervalInSeconds": 5,
+              "numberOfProbes": 2
+            }
+          },
+          {
+            "name": "weblbProbeHttps",
+            "properties": {
+              "protocol": "Tcp",
+              "port": 443,
+              "intervalInSeconds": 5,
+              "numberOfProbes": 2
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.Network/loadBalancers",
+      "name": "[variables('internalLoadBalancerName')]",
+      "apiVersion": "2021-01-01",
+      "location": "[parameters('location')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/virtualNetworks/', variables('virtualNetworkName'))]"
+      ],
+      "properties": {
+        "frontendIPConfigurations": [
+          {
+            "name": "loadBalancerFrontEnd",
+            "properties": {
+              "subnet": {
+                "id": "[resourceId('Microsoft.Network/virtualNetworks/subnets', variables('virtualNetworkName'), variables('WebSubnetName'))]"
+              }
+            }
+          }
+        ],
+        "backendAddressPools": [
+          {
+            "name": "loadBalancerBackEnd"
+          }
+        ],
+        "loadBalancingRules": [
+          {
+            "name": "internallbruleSSH",
+            "properties": {
+              "frontendIPConfiguration": {
+                "id": "[variables('internalFrontEndIPConfigID')]"
+              },
+              "backendAddressPool": {
+                "id": "[variables('internallbBackendPoolID')]"
+              },
+              "probe": {
+                "id": "[variables('internallbProbeSSHID')]"
+              },
+              "protocol": "Tcp",
+              "frontendPort": 22,
+              "backendPort": 22,
+              "idleTimeoutInMinutes": 15
+            }
+          }
+        ],
+        "probes": [
+          {
+            "name": "internallbProbeSSH",
+            "properties": {
+              "protocol": "Tcp",
+              "port": 22,
+              "intervalInSeconds": 15,
+              "numberOfProbes": 2
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.Network/networkInterfaces",
+      "name": "[concat(variables('webVmNicName'), copyindex(1))]",
+      "apiVersion": "2021-01-01",
+      "location": "[parameters('location')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/virtualNetworks/', variables('virtualNetworkName'))]",
+        "[resourceId('Microsoft.Network/loadBalancers/', variables('webLoadBalancerName'))]"
+      ],
+      "copy": {
+        "name": "webNicLoop",
+        "count": "[parameters('w-vm-count')]"
+      },
+      "properties": {
+        "ipConfigurations": [
+          {
+            "name": "ipconfig1",
+            "properties": {
+              "privateIPAllocationMethod": "Dynamic",
+              "subnet": {
+                "id": "[resourceId('Microsoft.Network/virtualNetworks/subnets', variables('virtualNetworkName'), variables('WebSubnetName'))]"
+              },
+              "loadBalancerBackendAddressPools": [
+                {
+                  "id": "[variables('weblbBackendPoolID')]"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.Network/networkInterfaces",
+      "name": "[concat(variables('appVmNicName'), copyindex(1))]",
+      "apiVersion": "2021-01-01",
+      "location": "[parameters('location')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/virtualNetworks/', variables('virtualNetworkName'))]",
+        "[resourceId('Microsoft.Network/loadBalancers/', variables('internalLoadBalancerName'))]"
+      ],
+      "copy": {
+        "name": "appNicLoop",
+        "count": "[parameters('a-vm-count')]"
+      },
+      "properties": {
+        "ipConfigurations": [
+          {
+            "name": "ipconfig1",
+            "properties": {
+              "privateIPAllocationMethod": "Dynamic",
+              "subnet": {
+                "id": "[resourceId('Microsoft.Network/virtualNetworks/subnets', variables('virtualNetworkName'), variables('AppSubnetName'))]"
+              },
+              "loadBalancerBackendAddressPools": [
+                {
+                  "id": "[variables('internallbBackendPoolID')]"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.Network/networkInterfaces",
+      "name": "[concat(variables('DBVmNicName'), copyindex(1))]",
+      "apiVersion": "2021-01-01",
+      "location": "[parameters('location')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/virtualNetworks/', variables('virtualNetworkName'))]"
+      ],
+      "copy": {
+        "name": "DBNicLoop",
+        "count": "[parameters('db-vm-count')]"
+      },
+      "properties": {
+        "ipConfigurations": [
+          {
+            "name": "ipconfig1",
+            "properties": {
+              "privateIPAllocationMethod": "Dynamic",
+              "subnet": {
+                "id": "[resourceId('Microsoft.Network/virtualNetworks/subnets', variables('virtualNetworkName'), variables('DBSubnetName'))]"
+              }
+            }
+          }
+        ]
+      }
+    },
+    
+    {
+      "type": "Microsoft.Compute/virtualMachines",
+      "name": "[concat(variables('webVmName'),'-', copyindex(1))]",
+      "apiVersion": "2021-01-01"
+      "location": "[parameters('location')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Storage/storageAccounts/', concat(variables('vmStorageAccountName'),'1'))]",
+        "[resourceId('Microsoft.Network/networkInterfaces/', concat(variables('webVmNicName'), copyindex(1)))]",
+        "[resourceId('Microsoft.Compute/availabilitySets/', concat(variables('availSetName'),'1'))]"
+      ],
+      "copy": {
+        "name": "webVMLoop",
+        "count": "[parameters('w-vm-count')]"
+      },
+      "properties": {
+        "availabilitySet": {
+          "id": "[resourceId('Microsoft.Compute/availabilitySets',concat(variables('availSetName'),'1'))]"
+        },
+        "hardwareProfile": {
+          "vmSize": "[parameters('vmSize')]"
+        },
+        "osProfile": {
+          "computerName": "[concat('webserver',copyindex(1))]",
+          "adminUsername": "[parameters('adminUsername')]",
+          "adminPassword": "[parameters('adminPasswordOrKey')]",
+          "linuxConfiguration": "[if(equals(parameters('authenticationType'), 'password'), json('null'), variables('linuxConfiguration'))]"
+        },
+        "storageProfile": {
+          "imageReference": {
+            "publisher": "[variables('Publisher')]",
+            "offer": "[variables('Offer')]",
+            "sku": "[variables('redHatsku')]",
+            "version": "latest"
+          },
+          "osDisk": {
+            "name": "[concat(variables('webVmName'),'-', copyindex(1),'_OSDisk')]",
+            "caching": "ReadWrite",
+            "createOption": "FromImage"
+          }
+        },
+        "networkProfile": {
+          "networkInterfaces": [
+            {
+              "id": "[resourceId('Microsoft.Network/networkInterfaces', concat(variables('webVmNicName'), copyindex(1)))]"
+            }
+          ]
+        },
+        "diagnosticsProfile": {
+          "bootDiagnostics": {
+            "enabled": true,
+            "storageUri": "[reference(resourceId('Microsoft.Storage/storageAccounts/', variables('diagStorageAccountName'))).primaryEndpoints.blob]"
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.Compute/virtualMachines",
+      "name": "[concat(variables('appVmName'),'-', copyindex(1))]",
+      "apiVersion": "2021-01-01"
+      "location": "[parameters('location')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Storage/storageAccounts/', concat(variables('vmStorageAccountName'),'2'))]",
+        "[resourceId('Microsoft.Network/networkInterfaces/', concat(variables('appVmNicName'), copyindex(1)))]",
+        "[resourceId('Microsoft.Compute/availabilitySets/',concat(variables('availSetName'),'2'))]"
+      ],
+      "copy": {
+        "name": "appVMLoop",
+        "count": "[parameters('a-vm-count')]"
+      },
+      "properties": {
+        "availabilitySet": {
+          "id": "[resourceId('Microsoft.Compute/availabilitySets',concat(variables('availSetName'),'2'))]"
+        },
+        "hardwareProfile": {
+          "vmSize": "[parameters('vmSize')]"
+        },
+        "osProfile": {
+          "computerName": "[concat('appserver',copyindex(1))]",
+          "adminUsername": "[parameters('adminUsername')]",
+          "adminPassword": "[parameters('adminPasswordOrKey')]",
+          "linuxConfiguration": "[if(equals(parameters('authenticationType'), 'password'), json('null'), variables('linuxConfiguration'))]"
+        },
+        "storageProfile": {
+          "imageReference": {
+            "publisher": "[variables('Publisher')]",
+            "offer": "[variables('Offer')]",
+            "sku": "[variables('redHatsku')]",
+            "version": "latest"
+          },
+          "osDisk": {
+            "name": "[concat(variables('appVmName'),'-', copyindex(1),'_OSDisk')]",
+            "caching": "ReadWrite",
+            "createOption": "FromImage"
+          }
+        },
+        "networkProfile": {
+          "networkInterfaces": [
+            {
+              "id": "[resourceId('Microsoft.Network/networkInterfaces', concat(variables('appVmNicName'), copyindex(1)))]"
+            }
+          ]
+        },
+        "diagnosticsProfile": {
+          "bootDiagnostics": {
+            "enabled": true,
+            "storageUri": "[reference(resourceId('Microsoft.Storage/storageAccounts/', variables('diagStorageAccountName'))).primaryEndpoints.blob]"
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.Compute/virtualMachines",
+      "name": "[concat(variables('DBVmName'),'-', copyindex(1))]",
+      "apiVersion": "2021-01-01"
+      "location": "[parameters('location')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Storage/storageAccounts/', concat(variables('vmStorageAccountName'),'3'))]",
+        "[resourceId('Microsoft.Network/networkInterfaces/', concat(variables('DBVmNicName'), copyindex(1)))]",
+        "[resourceId('Microsoft.Compute/availabilitySets/', concat(variables('availSetName'),'3'))]"
+      ],
+      "copy": {
+        "name": "DBVMLoop",
+        "count": "[parameters('db-vm-count')]"
+      },
+      "properties": {
+        "availabilitySet": {
+          "id": "[resourceId('Microsoft.Compute/availabilitySets',concat(variables('availSetName'),'3'))]"
+        },
+        "hardwareProfile": {
+          "vmSize": "[parameters('vmSize')]"
+        },
+        "osProfile": {
+          "computerName": "[concat('databaseserver',copyindex(1))]",
+          "adminUsername": "[parameters('adminUsername')]",
+          "adminPassword": "[parameters('adminPasswordOrKey')]",
+          "linuxConfiguration": "[if(equals(parameters('authenticationType'), 'password'), json('null'), variables('linuxConfiguration'))]"
+        },
+        "storageProfile": {
+          "imageReference": {
+            "publisher": "[variables('Publisher')]",
+            "offer": "[variables('Offer')]",
+            "sku": "[variables('redHatsku')]",
+            "version": "latest"
+          },
+          "osDisk": {
+            "name": "[concat(variables('DBVmName'),'-', copyindex(1),'_OSDisk')]",
+            "caching": "ReadWrite",
+            "createOption": "FromImage"
+          }
+        },
+        "networkProfile": {
+          "networkInterfaces": [
+            {
+              "id": "[resourceId('Microsoft.Network/networkInterfaces', concat(variables('DBVmNicName'), copyindex(1)))]"
+            }
+          ]
+        },
+        "diagnosticsProfile": {
+          "bootDiagnostics": {
+            "enabled": true,
+            "storageUri": "[reference(resourceId('Microsoft.Storage/storageAccounts/', variables('diagStorageAccountName'))).primaryEndpoints.blob]"
+          }
+        }
+      }
+    },
+  ]
+}
